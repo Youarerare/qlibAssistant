@@ -446,7 +446,14 @@ class ModelCLI:
                 for _, row in sub_df.iterrows():
                     result_lines.append(f"\ttop{top_num} 止盈{row['profit_num']} 胜率: {row['topk_df_profit']:.2%}")
                 result_string += '\n'.join(result_lines) + "\n"
-        # print(result_string)
+
+        # 使用 groupby('top_num') 来遍历 stats_df
+        if stats_df is not None and 'top_num' in stats_df.columns:
+            for top_num, group in stats_df.groupby('top_num'):
+                # 按 top_num 分组汇总结果字符串
+                self.review_result_string += f"\n#### top{top_num}\n"
+                self.review_result_string += group.to_markdown(index=False) + "\n"
+
         return stats_df, result_string
 
     def _review_subdir(self, subdir):
@@ -539,23 +546,9 @@ class ModelCLI:
         self.review_result_string += f"### {date_str}_ret.csv\n"
         stats_df, result_string = self._review_csv(df_ret, real_df, next1_date_original_data, next2_date_original_data)
 
-
-        # 使用 groupby('top_num') 来遍历 stats_df
-        if stats_df is not None and 'top_num' in stats_df.columns:
-            for top_num, group in stats_df.groupby('top_num'):
-                # 按 top_num 分组汇总结果字符串
-                self.review_result_string += f"\n#### top{top_num}\n"
-                self.review_result_string += group.to_markdown(index=False) + "\n"
-
         print("分析 df_filter_ret:")
         self.review_result_string += f"### {date_str}_filter_ret.csv\n"
         stats_df, result_string = self._review_csv(df_filter_ret, real_df, next1_date_original_data, next2_date_original_data)
-        # 使用 groupby('top_num') 来遍历 stats_df
-        if stats_df is not None and 'top_num' in stats_df.columns:
-            for top_num, group in stats_df.groupby('top_num'):
-                # 按 top_num 分组汇总结果字符串
-                self.review_result_string += f"\n#### top{top_num}\n"
-                self.review_result_string += group.to_markdown(index=False) + "\n"
 
     def review(self):
         """马后炮"""
