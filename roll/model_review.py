@@ -109,28 +109,37 @@ class ModelReviewHelper:
             print("未发现格式为 xxxx-xx-xx_ 的 CSV 文件名")
 
         trade_data_list = get_trade_data(self.kwargs.get("provider_uri"))
-        if date_str and trade_data_list and date_str in trade_data_list[-2:]:
-            logger.info(f"还不能复盘 {date_str}")
-            self.review_result_string += f"\n{subdir.name} 还不能复盘 {date_str}\n"
+        if not date_str:
+            logger.info(f"{subdir.name} 未提取到有效日期，不能复盘")
+            self.review_result_string += f"\n{subdir.name} 未提取到有效日期，不能复盘\n"
             return
 
-        next1_date = None
-        if date_str and trade_data_list:
-            try:
-                idx = trade_data_list.index(date_str)
-                if idx + 1 < len(trade_data_list):
-                    next1_date = trade_data_list[idx + 1]
-            except ValueError:
-                next1_date = None
+        if not trade_data_list:
+            logger.info(f"{subdir.name} 交易日日历为空，不能复盘 {date_str}")
+            self.review_result_string += (
+                f"\n{subdir.name} 交易日日历为空，不能复盘 {date_str}\n"
+            )
+            return
 
-        next2_date = None
-        if next1_date and trade_data_list:
-            try:
-                idx = trade_data_list.index(next1_date)
-                if idx + 1 < len(trade_data_list):
-                    next2_date = trade_data_list[idx + 1]
-            except ValueError:
-                next2_date = None
+        try:
+            idx = trade_data_list.index(date_str)
+        except ValueError:
+            logger.info(f"{subdir.name} 日期 {date_str} 不在交易日日历中，不能复盘")
+            self.review_result_string += (
+                f"\n{subdir.name} 日期 {date_str} 不在交易日日历中，不能复盘\n"
+            )
+            return
+
+        # 复盘依赖下一个与下下个交易日，任一缺失都不执行复盘。
+        if idx + 2 >= len(trade_data_list):
+            logger.info(f"还不能复盘 {date_str}")
+            self.review_result_string += (
+                f"\n{subdir.name} 还不能复盘 {date_str}（后续交易日不足）\n"
+            )
+            return
+
+        next1_date = trade_data_list[idx + 1]
+        next2_date = trade_data_list[idx + 2]
 
         logger.info(
             f"开始复盘 {date_str if date_str else '[未知日期]'}  "
