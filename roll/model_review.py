@@ -324,6 +324,14 @@ class ModelReviewHelper:
             self._backtest_handle_df_topk(df_ret, csi300_df, date_range_list, name, top_num)
 
 
+    def save_backtest_result(self):
+        backtest_dir = Path("../backtest_csv")
+        backtest_dir.mkdir(parents=True, exist_ok=True)
+        for name, df in self.backtest_result_df.items():
+            df.to_csv(backtest_dir / f"{name}_ret.csv", index=True)
+        for name, df in self.backtest_result_df_filter.items():
+            df.to_csv(backtest_dir / f"{name}_filter_ret.csv", index=True)
+
     # ---------- 回测 对外入口----------
     '''
     回测对象: ret 和 filter 的 topk 股票组合, benchmark: csi300
@@ -348,8 +356,9 @@ class ModelReviewHelper:
         self._backtest_handle_df(self.review_result_df, csi300_df, date_range_list, "ret")
         self._backtest_handle_df(self.review_result_df_filter, csi300_df, date_range_list, "filter_ret")
 
-
-
         logger.info("backtest result:")
         pprint(self.backtest_result_df)
         pprint(self.backtest_result_df_filter)
+
+        self.save_backtest_result()
+        logger.info("backtest result saved to ../backtest_csv")
