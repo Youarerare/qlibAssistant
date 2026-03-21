@@ -9,6 +9,9 @@ on:
   # 保留手动触发按钮，方便调试
   workflow_dispatch:
 
+env:
+  DOLT_TOKEN: ${{ secrets.DOLT_TOKEN }}
+
 jobs:
   check-home-access:
     runs-on: ubuntu-latest
