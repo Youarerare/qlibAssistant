@@ -1,0 +1,1135 @@
+# QlibAssistant 智能因子研究与模型对比平台 - 完整实现方案
+
+## 一、项目目标
+
+构建一个智能化的量化因子研究平台，能够：
+1. 便捷地将 LLM 研究出的因子组合起来训练模型
+2. 方便地与其他模型进行对比评估
+3. 支持自动化实验管理和结果可视化
+
+---
+
+## 二、核心架构设计
+
+### 2.1 新增文件结构
+
+```
+qlibAssistant/
+├── research/                          # 新增：因子研究模块
+│   ├── __init__.py
+│   ├── factor_registry.py             # 因子注册中心
+│   ├── factor_combiner.py             # 因子组合器
+│   ├── experiment_manager.py          # 实验管理器
+│   ├── model_comparator.py            # 模型对比器
+│   └── report_generator.py            # 报告生成器
+├── factors/                           # 新增：自定义因子库
+│   ├── __init__.py
+│   ├── base_factor.py                 # 因子基类
+│   ├── custom_factors/                # LLM 生成的因子放这里
+│   │   ├── factor_001_momentum.py
+│   │   ├── factor_002_reversal.py
+│   │   └── ...
+│   └── factor_groups/                 # 因子组合配置
+│       ├── group_tech_indicator.yaml
+│       ├── group_fundamental.yaml
+│       └── group_llm_research.yaml
+├── experiments/                       # 新增：实验记录
+│   ├── exp_001_baseline/
+│   ├── exp_002_llm_factors/
+│   └── exp_results.json
+├── templates/                         # 新增：代码模板
+│   ├── factor_template.py
+│   └── experiment_config.yaml
+└── scripts/                           # 新增：便捷脚本
+    ├── run_experiment.py
+    ├── compare_models.py
+    └── register_factor.py
+```
+
+---
+
+## 三、核心模块实现
+
+### 3.1 因子注册中心 (factor_registry.py)
+
+```python
+"""
+因子注册中心：统一管理所有因子，支持动态注册和组合
+"""
+from typing import Dict, List, Callable, Optional
+from dataclasses import dataclass, field
+import yaml
+from pathlib import Path
+
+@dataclass
+class FactorInfo:
+    """因子信息"""
+    name: str
+    description: str
+    formula: str
+    source: str  # 'paper', 'llm', 'manual'
+    parameters: Dict = field(default_factory=dict)
+    code_path: Optional[str] = None
+    performance_metrics: Dict = field(default_factory=dict)
+
+class FactorRegistry:
+    """因子注册中心"""
+    
+    def __init__(self, factors_dir: str = "factors/custom_factors"):
+        self.factors_dir = Path(factors_dir)
+        self.factors: Dict[str, FactorInfo] = {}
+        self.factor_groups: Dict[str, List[str]] = {}
+        self._load_existing_factors()
+    
+    def register_factor(self, factor_info: FactorInfo):
+        """注册新因子"""
+        self.factors[factor_info.name] = factor_info
+        self._save_factor_info(factor_info)
+    
+    def create_factor_group(self, group_name: str, factor_names: List[str]):
+        """创建因子组合"""
+        self.factor_groups[group_name] = factor_names
+        self._save_factor_group(group_name, factor_names)
+    
+    def get_factor_group(self, group_name: str) -> List[FactorInfo]:
+        """获取因子组合"""
+        if group_name not in self.factor_groups:
+            raise ValueError(f"因子组合 {group_name} 不存在")
+        return [self.factors[name] for name in self.factor_groups[group_name]]
+    
+    def list_factors(self, source: Optional[str] = None) -> List[FactorInfo]:
+        """列出所有因子，可按来源过滤"""
+        if source:
+            return [f for f in self.factors.values() if f.source == source]
+        return list(self.factors.values())
+    
+    def _load_existing_factors(self):
+        """加载已有因子"""
+        if self.factors_dir.exists():
+            for factor_file in self.factors_dir.glob("*.yaml"):
+                with open(factor_file, 'r', encoding='utf-8') as f:
+                    data = yaml.safe_load(f)
+                    self.factors[data['name']] = FactorInfo(**data)
+    
+    def _save_factor_info(self, factor_info: FactorInfo):
+        """保存因子信息"""
+        self.factors_dir.mkdir(parents=True, exist_ok=True)
+        with open(self.factors_dir / f"{factor_info.name}.yaml", 'w', encoding='utf-8') as f:
+            yaml.dump(factor_info.__dict__, f, allow_unicode=True)
+    
+    def _save_factor_group(self, group_name: str, factor_names: List[str]):
+        """保存因子组合"""
+        groups_dir = Path("factors/factor_groups")
+        groups_dir.mkdir(parents=True, exist_ok=True)
+        with open(groups_dir / f"{group_name}.yaml", 'w', encoding='utf-8') as f:
+            yaml.dump({'group_name': group_name, 'factors': factor_names}, f, allow_unicode=True)
+```
+
+### 3.2 因子组合器 (factor_combiner.py)
+
+```python
+"""
+因子组合器：将多个因子组合成特征集，用于模型训练
+"""
+import pandas as pd
+import numpy as np
+from typing import List, Dict, Optional
+from qlib.data import D
+from qlib.contrib.data.handler import Alpha158
+from factor_registry import FactorRegistry, FactorInfo
+
+class FactorCombiner:
+    """因子组合器"""
+    
+    def __init__(self, registry: FactorRegistry):
+        self.registry = registry
+    
+    def build_custom_handler(self, factor_group_name: str, instruments: str = "csi300",
+                            start_time: str = "2020-01-01", end_time: str = "2024-12-31"):
+        """
+        根据因子组合构建自定义 Qlib Handler
+        
+        Args:
+            factor_group_name: 因子组合名称
+            instruments: 股票池
+            start_time: 开始时间
+            end_time: 结束时间
+        
+        Returns:
+            自定义 Handler 配置（可直接用于 Qlib 训练）
+        """
+        factors = self.registry.get_factor_group(factor_group_name)
+        
+        # 构建因子表达式列表
+        factor_fields = {}
+        for factor in factors:
+            factor_fields[factor.name] = factor.formula
+        
+        # 构建 Qlib Handler 配置
+        handler_config = {
+            "class": "Alpha158",
+            "module_path": "qlib.contrib.data.handler",
+            "kwargs": {
+                "start_time": start_time,
+                "end_time": end_time,
+                "fit_start_time": start_time,
+                "fit_end_time": end_time,
+                "instruments": instruments,
+                # 添加自定义因子
+                "config": [
+                    {
+                        "feature_name": name,
+                        "feature_config": {
+                            "expr": formula,
+                            "name": name
+                        }
+                    }
+                    for name, formula in factor_fields.items()
+                ]
+            }
+        }
+        
+        return handler_config
+    
+    def merge_with_baseline(self, factor_group_name: str, baseline: str = "Alpha158"):
+        """
+        将自定义因子与基线因子合并
+        
+        Args:
+            factor_group_name: 自定义因子组合
+            baseline: 基线因子集（如 Alpha158, Alpha360）
+        
+        Returns:
+            合并后的因子配置
+        """
+        factors = self.registry.get_factor_group(factor_group_name)
+        
+        merge_config = {
+            "baseline": baseline,
+            "custom_factors": [f.name for f in factors],
+            "total_factor_count": 158 + len(factors)  # Alpha158 + 自定义
+        }
+        
+        return merge_config
+    
+    def evaluate_factor_correlation(self, factor_names: List[str], 
+                                   start_time: str = "2023-01-01",
+                                   end_time: str = "2023-12-31"):
+        """
+        评估因子间相关性，避免高度相关因子重复
+        
+        Args:
+            factor_names: 因子名称列表
+            start_time: 开始时间
+            end_time: 结束时间
+        
+        Returns:
+            相关性矩阵
+        """
+        # 获取因子数据
+        factor_data = {}
+        for name in factor_names:
+            factor_info = self.registry.factors[name]
+            # 这里需要根据实际因子公式获取数据
+            # 简化示例：
+            df = D.features(["SH000300"], [factor_info.formula], 
+                           start_time=start_time, end_time=end_time)
+            factor_data[name] = df
+        
+        # 计算相关性矩阵
+        combined_df = pd.concat(factor_data.values(), axis=1)
+        correlation_matrix = combined_df.corr()
+        
+        return correlation_matrix
+```
+
+### 3.3 实验管理器 (experiment_manager.py)
+
+```python
+"""
+实验管理器：管理因子组合训练实验，记录实验配置和结果
+"""
+import json
+import yaml
+from pathlib import Path
+from datetime import datetime
+from typing import Dict, List, Optional
+from dataclasses import dataclass, field, asdict
+import subprocess
+
+@dataclass
+class ExperimentConfig:
+    """实验配置"""
+    name: str
+    description: str
+    factor_group: str
+    model_type: str  # 'xgboost', 'lightgbm', 'catboost', 'linear'
+    dataset: str
+    instruments: str
+    train_start: str
+    train_end: str
+    valid_start: str
+    valid_end: str
+    test_start: str
+    test_end: str
+    rolling_type: str = "expanding"
+    rolling_step: int = 60
+    hyperparameters: Dict = field(default_factory=dict)
+
+@dataclass
+class ExperimentResult:
+    """实验结果"""
+    exp_name: str
+    ic: float
+    icir: float
+    rank_ic: float
+    rank_icir: float
+    annualized_return: float
+    max_drawdown: float
+    sharpe_ratio: float
+    information_ratio: float
+    model_path: str
+    timestamp: str
+
+class ExperimentManager:
+    """实验管理器"""
+    
+    def __init__(self, experiments_dir: str = "experiments"):
+        self.experiments_dir = Path(experiments_dir)
+        self.experiments_dir.mkdir(parents=True, exist_ok=True)
+        self.experiments: Dict[str, Dict] = self._load_experiments()
+    
+    def create_experiment(self, config: ExperimentConfig) -> str:
+        """
+        创建新实验
+        
+        Args:
+            config: 实验配置
+        
+        Returns:
+            实验名称
+        """
+        exp_name = f"exp_{len(self.experiments) + 1:03d}_{config.name}"
+        exp_dir = self.experiments_dir / exp_name
+        exp_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 保存配置
+        with open(exp_dir / "config.yaml", 'w', encoding='utf-8') as f:
+            yaml.dump(asdict(config), f, allow_unicode=True)
+        
+        # 记录实验
+        self.experiments[exp_name] = {
+            "config": asdict(config),
+            "status": "created",
+            "created_at": datetime.now().isoformat()
+        }
+        
+        return exp_name
+    
+    def run_experiment(self, exp_name: str) -> ExperimentResult:
+        """
+        运行实验
+        
+        Args:
+            exp_name: 实验名称
+        
+        Returns:
+            实验结果
+        """
+        exp_dir = self.experiments_dir / exp_name
+        config_file = exp_dir / "config.yaml"
+        
+        # 调用训练脚本
+        cmd = [
+            "python", "roll/roll.py", "model", "train",
+            "--config", str(config_file),
+            "--exp-name", exp_name
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if result.returncode != 0:
+            raise RuntimeError(f"实验运行失败: {result.stderr}")
+        
+        # 解析结果
+        exp_result = self._parse_experiment_result(exp_name)
+        
+        # 更新实验状态
+        self.experiments[exp_name]["status"] = "completed"
+        self.experiments[exp_name]["result"] = asdict(exp_result)
+        self._save_experiments()
+        
+        return exp_result
+    
+    def compare_experiments(self, exp_names: List[str]) -> pd.DataFrame:
+        """
+        对比多个实验结果
+        
+        Args:
+            exp_names: 实验名称列表
+        
+        Returns:
+            对比结果 DataFrame
+        """
+        results = []
+        for name in exp_names:
+            if name in self.experiments and "result" in self.experiments[name]:
+                result_data = self.experiments[name]["result"]
+                result_data["exp_name"] = name
+                results.append(result_data)
+        
+        df = pd.DataFrame(results)
+        return df
+    
+    def _load_experiments(self) -> Dict:
+        """加载实验记录"""
+        exp_file = self.experiments_dir / "experiments.json"
+        if exp_file.exists():
+            with open(exp_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return {}
+    
+    def _save_experiments(self):
+        """保存实验记录"""
+        exp_file = self.experiments_dir / "experiments.json"
+        with open(exp_file, 'w', encoding='utf-8') as f:
+            json.dump(self.experiments, f, ensure_ascii=False, indent=2)
+    
+    def _parse_experiment_result(self, exp_name: str) -> ExperimentResult:
+        """解析实验结果（从 Qlib workflow 中获取）"""
+        # 这里需要从 Qlib 的 recorder 中读取实际结果
+        # 简化示例：
+        return ExperimentResult(
+            exp_name=exp_name,
+            ic=0.05,
+            icir=0.3,
+            rank_ic=0.04,
+            rank_icir=0.25,
+            annualized_return=0.15,
+            max_drawdown=0.2,
+            sharpe_ratio=0.75,
+            information_ratio=0.5,
+            model_path=str(self.experiments_dir / exp_name / "model.pkl"),
+            timestamp=datetime.now().isoformat()
+        )
+```
+
+### 3.4 模型对比器 (model_comparator.py)
+
+```python
+"""
+模型对比器：对比不同模型/因子组合的性能
+"""
+import pandas as pd
+import numpy as np
+from typing import List, Dict, Optional
+from pathlib import Path
+import matplotlib.pyplot as plt
+import seaborn as sns
+from experiment_manager import ExperimentManager
+
+class ModelComparator:
+    """模型对比器"""
+    
+    def __init__(self, exp_manager: ExperimentManager):
+        self.exp_manager = exp_manager
+    
+    def compare_models(self, exp_names: List[str], 
+                      metrics: List[str] = None) -> pd.DataFrame:
+        """
+        对比多个模型
+        
+        Args:
+            exp_names: 实验名称列表
+            metrics: 要对比的指标列表
+        
+        Returns:
+            对比结果 DataFrame
+        """
+        if metrics is None:
+            metrics = ['ic', 'icir', 'rank_ic', 'rank_icir', 
+                      'annualized_return', 'max_drawdown', 'sharpe_ratio']
+        
+        df = self.exp_manager.compare_experiments(exp_names)
+        
+        if df.empty:
+            raise ValueError("没有找到实验结果")
+        
+        # 提取关键指标
+        comparison = df[['exp_name'] + metrics].copy()
+        
+        # 计算排名
+        for metric in metrics:
+            if metric == 'max_drawdown':
+                # 最大回撤越小越好
+                comparison[f'{metric}_rank'] = comparison[metric].rank(ascending=True)
+            else:
+                # 其他指标越大越好
+                comparison[f'{metric}_rank'] = comparison[metric].rank(ascending=False)
+        
+        # 综合排名
+        rank_columns = [f'{m}_rank' for m in metrics]
+        comparison['overall_rank'] = comparison[rank_columns].mean(axis=1).rank()
+        
+        return comparison.sort_values('overall_rank')
+    
+    def plot_comparison(self, comparison_df: pd.DataFrame, 
+                       save_path: str = "experiments/comparison.png"):
+        """
+        绘制对比图表
+        
+        Args:
+            comparison_df: 对比结果 DataFrame
+            save_path: 保存路径
+        """
+        metrics = ['ic', 'icir', 'annualized_return', 'sharpe_ratio']
+        
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        axes = axes.flatten()
+        
+        for i, metric in enumerate(metrics):
+            ax = axes[i]
+            comparison_df.plot.bar(x='exp_name', y=metric, ax=ax, legend=False)
+            ax.set_title(f'{metric.upper()} Comparison')
+            ax.set_xlabel('')
+            ax.tick_params(axis='x', rotation=45)
+        
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    def generate_comparison_report(self, exp_names: List[str],
+                                  save_path: str = "experiments/report.md"):
+        """
+        生成对比报告
+        
+        Args:
+            exp_names: 实验名称列表
+            save_path: 报告保存路径
+        """
+        comparison = self.compare_models(exp_names)
+        
+        report = f"""# 模型对比报告
+
+生成时间: {pd.Timestamp.now()}
+
+## 对比实验
+
+{', '.join(exp_names)}
+
+## 性能对比
+
+{comparison.to_markdown()}
+
+## 最佳模型
+
+根据综合排名，最佳模型是: **{comparison.iloc[0]['exp_name']}**
+
+## 详细分析
+
+### IC 分析
+- 最高 IC: {comparison['ic'].max():.4f}
+- 最低 IC: {comparison['ic'].min():.4f}
+- 平均 IC: {comparison['ic'].mean():.4f}
+
+### 风险收益分析
+- 最高年化收益: {comparison['annualized_return'].max():.2%}
+- 最大回撤最小: {comparison['max_drawdown'].min():.2%}
+- 最高夏普比率: {comparison['sharpe_ratio'].max():.2f}
+
+## 建议
+
+根据以上分析，建议:
+1. 使用 {comparison.iloc[0]['exp_name']} 作为主模型
+2. 关注 {comparison.iloc[1]['exp_name']} 作为备选
+3. 定期重新评估模型表现
+"""
+        
+        with open(save_path, 'w', encoding='utf-8') as f:
+            f.write(report)
+        
+        return report
+```
+
+---
+
+## 四、LLM 提示词模板
+
+### 4.1 因子生成提示词
+
+```
+你是一个专业的量化因子研究员。请根据以下论文/研报内容，提取并生成可用于 Qlib 的因子代码。
+
+## 任务要求
+
+1. 从论文中提取所有有价值的因子
+2. 为每个因子生成完整的 Python 代码
+3. 代码必须符合 Qlib 的因子表达式规范
+4. 提供因子的详细说明文档
+
+## 论文内容
+
+{论文文本或关键段落}
+
+## 输出格式
+
+请按照以下格式输出每个因子：
+
+### 因子 1: [因子名称]
+
+**因子描述**: [简要说明因子含义和经济逻辑]
+
+**数据来源**: [需要哪些数据]
+
+**计算公式**: [数学公式]
+
+**Qlib 因子表达式**:
+```python
+# 这里是 Qlib 格式的因子表达式
+# 例如: $close / $open - 1
+[因子表达式]
+```
+
+**Python 实现代码**:
+```python
+import pandas as pd
+import numpy as np
+
+def calculate_[factor_name](data: pd.DataFrame) -> pd.Series:
+    """
+    计算 [因子名称]
+    
+    Args:
+        data: 包含 OHLCV 数据的 DataFrame
+    
+    Returns:
+        因子值 Series
+    """
+    # 实现代码
+    pass
+```
+
+**参数说明**:
+- [参数1]: [说明]
+- [参数2]: [说明]
+
+**预期效果**:
+- IC 预期: [预期 IC 值范围]
+- 适用场景: [适合什么市场环境]
+- 风险提示: [可能的风险]
+
+---
+
+## 额外要求
+
+1. 因子表达式必须使用 Qlib 的语法（如 $close, $open, $volume 等）
+2. 如果因子需要复杂计算，请提供完整的 Python 函数
+3. 考虑因子的计算效率和内存占用
+4. 提供因子预处理建议（如去极值、标准化、中性化等）
+5. 如果可能，提供因子的历史表现预期
+```
+
+### 4.2 因子组合优化提示词
+
+```
+你是一个量化策略研究员。现在我有一组通过 LLM 研究出的因子，请帮我设计最优的因子组合方案。
+
+## 已有因子列表
+
+{因子列表，包含名称、描述、预期性能}
+
+## 任务要求
+
+1. 分析这些因子之间的相关性
+2. 设计因子组合方案（分组）
+3. 为每个组合方案提供训练配置
+4. 给出对比实验方案
+
+## 输出格式
+
+### 方案 1: [方案名称]
+
+**包含因子**: [因子列表]
+
+**组合逻辑**: [为什么这样组合]
+
+**预期优势**: [预期效果]
+
+**Qlib 训练配置**:
+```yaml
+factor_group: [group_name]
+model_type: xgboost
+dataset: Alpha158
+instruments: csi300
+train_start: "2020-01-01"
+train_end: "2023-12-31"
+test_start: "2024-01-01"
+test_end: "2024-12-31"
+hyperparameters:
+  learning_rate: 0.05
+  max_depth: 6
+  n_estimators: 500
+```
+
+### 方案 2: [方案名称]
+
+[同上格式]
+
+---
+
+## 对比实验设计
+
+请设计以下对比实验：
+
+1. **基线实验**: 仅使用 Alpha158 因子
+2. **实验 1**: Alpha158 + [因子组合 1]
+3. **实验 2**: Alpha158 + [因子组合 2]
+4. **实验 3**: 仅使用 [因子组合 1]
+5. **实验 4**: 仅使用 [因子组合 2]
+
+为每个实验提供完整的配置和预期结果分析框架。
+```
+
+### 4.3 模型训练与评估提示词
+
+```
+你是一个量化模型工程师。请帮我生成完整的模型训练和评估代码，用于对比不同因子组合的效果。
+
+## 背景信息
+
+- 基础框架: Qlib
+- 已有模块: factor_registry.py, factor_combiner.py, experiment_manager.py, model_comparator.py
+- 目标: 训练多个模型并对比性能
+
+## 任务要求
+
+1. 生成完整的训练脚本
+2. 支持多种模型类型（XGBoost, LightGBM, CatBoost, Linear）
+3. 自动记录实验结果
+4. 生成对比报告
+5. 提供可视化图表
+
+## 输出要求
+
+请生成以下文件：
+
+### 1. scripts/run_experiment.py
+
+完整的实验运行脚本，支持命令行参数：
+```bash
+python scripts/run_experiment.py --factor-group group_llm_001 --model xgboost --exp-name exp_001
+```
+
+### 2. scripts/compare_models.py
+
+模型对比脚本，支持：
+```bash
+python scripts/compare_models.py --experiments exp_001,exp_002,exp_003 --output report.md
+```
+
+### 3. 使用示例
+
+提供完整的使用示例，包括：
+- 如何注册新因子
+- 如何创建因子组合
+- 如何运行实验
+- 如何对比结果
+
+## 代码要求
+
+1. 代码必须与现有项目结构兼容
+2. 使用现有的 roll/roll.py 作为训练入口
+3. 结果保存到 experiments/ 目录
+4. 支持断点续跑
+5. 提供详细的日志输出
+```
+
+### 4.4 完整工作流提示词（一键生成所有代码）
+
+```
+你是一个全栈量化开发工程师。请帮我实现一个完整的因子研究和模型对比平台。
+
+## 项目背景
+
+我有一个基于 Qlib 的量化交易系统 (qlibAssistant)，现在需要扩展以下功能：
+
+1. 方便地注册和管理 LLM 研究出的因子
+2. 将因子组合起来训练模型
+3. 对比不同因子组合/模型的性能
+4. 生成可视化报告
+
+## 现有项目结构
+
+```
+qlibAssistant/
+├── roll/
+│   ├── roll.py              # 主入口
+│   ├── traincli.py          # 训练模块
+│   ├── modelcli.py          # 模型管理
+│   ├── datacli.py           # 数据管理
+│   └── config.yaml          # 配置文件
+├── tests/
+├── requirements.txt
+└── README.md
+```
+
+## 需要实现的功能
+
+### 功能 1: 因子注册系统
+- 支持通过 YAML 配置文件注册因子
+- 自动验证因子表达式合法性
+- 提供因子信息查询和列表功能
+
+### 功能 2: 因子组合器
+- 支持创建因子组合（分组）
+- 自动构建 Qlib Handler 配置
+- 支持因子相关性分析
+
+### 功能 3: 实验管理器
+- 管理训练实验
+- 记录实验配置和结果
+- 支持实验对比
+
+### 功能 4: 模型对比器
+- 对比多个模型的性能指标
+- 生成对比图表
+- 生成 Markdown 报告
+
+## 技术要求
+
+1. **兼容性**: 必须与现有 Qlib 系统兼容
+2. **模块化**: 每个功能独立模块，便于测试和维护
+3. **可扩展**: 支持未来添加新功能
+4. **易用性**: 提供命令行工具和 API
+5. **文档**: 每个函数都有详细的 docstring
+
+## 输出要求
+
+请生成以下完整文件：
+
+1. research/__init__.py
+2. research/factor_registry.py
+3. research/factor_combiner.py
+4. research/experiment_manager.py
+5. research/model_comparator.py
+6. research/report_generator.py
+7. factors/__init__.py
+8. factors/base_factor.py
+9. factors/factor_groups/example_group.yaml
+10. scripts/run_experiment.py
+11. scripts/compare_models.py
+12. scripts/register_factor.py
+13. templates/factor_template.py
+14. templates/experiment_config.yaml
+15. docs/usage_guide.md (使用说明)
+
+每个文件都必须：
+- 包含完整的代码实现
+- 有详细的注释和 docstring
+- 符合 PEP 8 规范
+- 包含错误处理
+- 提供使用示例
+
+## 额外要求
+
+1. 提供完整的测试用例
+2. 提供 CI/CD 配置建议
+3. 提供性能优化建议
+4. 提供部署指南
+```
+
+---
+
+## 五、使用流程示例
+
+### 5.1 注册 LLM 研究出的因子
+
+```bash
+# 方式 1: 使用命令行工具
+python scripts/register_factor.py \
+    --name "momentum_20d" \
+    --description "20日动量因子" \
+    --formula "$close / Ref($close, 20) - 1" \
+    --source "llm" \
+    --parameters '{"window": 20}'
+
+# 方式 2: 直接创建 YAML 文件
+# factors/custom_factors/momentum_20d.yaml
+```
+
+### 5.2 创建因子组合
+
+```python
+from research.factor_registry import FactorRegistry
+
+registry = FactorRegistry()
+
+# 创建因子组合
+registry.create_factor_group("llm_research_001", [
+    "momentum_20d",
+    "reversal_5d",
+    "volume_price_trend",
+    "volatility_adjusted_return"
+])
+
+# 查看因子列表
+print(registry.list_factors(source="llm"))
+```
+
+### 5.3 运行对比实验
+
+```bash
+# 实验 1: 基线模型
+python scripts/run_experiment.py \
+    --factor-group baseline \
+    --model xgboost \
+    --exp-name exp_001_baseline
+
+# 实验 2: LLM 因子组合
+python scripts/run_experiment.py \
+    --factor-group llm_research_001 \
+    --model xgboost \
+    --exp-name exp_002_llm_factors
+
+# 实验 3: 不同模型对比
+python scripts/run_experiment.py \
+    --factor-group llm_research_001 \
+    --model lightgbm \
+    --exp-name exp_003_llm_lgbm
+```
+
+### 5.4 生成对比报告
+
+```bash
+python scripts/compare_models.py \
+    --experiments exp_001_baseline,exp_002_llm_factors,exp_003_llm_lgbm \
+    --output experiments/comparison_report.md \
+    --plot experiments/comparison.png
+```
+
+### 5.5 查看结果
+
+```python
+from research.model_comparator import ModelComparator
+from research.experiment_manager import ExperimentManager
+
+exp_manager = ExperimentManager()
+comparator = ModelComparator(exp_manager)
+
+# 对比模型
+comparison = comparator.compare_models([
+    "exp_001_baseline",
+    "exp_002_llm_factors",
+    "exp_003_llm_lgbm"
+])
+
+print(comparison)
+
+# 生成报告
+comparator.generate_comparison_report(
+    ["exp_001_baseline", "exp_002_llm_factors", "exp_003_llm_lgbm"],
+    save_path="experiments/report.md"
+)
+```
+
+---
+
+## 六、快速上手指南
+
+### 6.1 第一步：安装依赖
+
+```bash
+pip install -r requirements.txt
+pip install matplotlib seaborn tabulate
+```
+
+### 6.2 第二步：复制代码
+
+将本方案中第三部分（核心模块实现）的代码复制到对应文件。
+
+### 6.3 第三步：测试因子注册
+
+```python
+from research.factor_registry import FactorRegistry, FactorInfo
+
+registry = FactorRegistry()
+
+# 注册测试因子
+factor = FactorInfo(
+    name="test_momentum",
+    description="测试动量因子",
+    formula="$close / Ref($close, 10) - 1",
+    source="manual",
+    parameters={"window": 10}
+)
+
+registry.register_factor(factor)
+print("因子注册成功！")
+```
+
+### 6.4 第四步：创建因子组合
+
+```python
+registry.create_factor_group("test_group", ["test_momentum"])
+print("因子组合创建成功！")
+```
+
+### 6.5 第五步：运行实验
+
+```bash
+python scripts/run_experiment.py --factor-group test_group --model linear --exp-name exp_test
+```
+
+---
+
+## 七、常见问题与解决方案
+
+### Q1: 如何验证因子表达式是否正确？
+
+A: 使用 Qlib 的 D.features() 方法测试：
+
+```python
+from qlib.data import D
+
+# 测试因子表达式
+df = D.features(["SH000300"], ["$close / Ref($close, 10) - 1"], 
+               start_time="2023-01-01", end_time="2023-01-31")
+print(df.head())
+```
+
+### Q2: 如何处理因子缺失值？
+
+A: 在因子注册时添加预处理配置：
+
+```yaml
+preprocessing:
+  drop_na: true
+  fillna: 0
+  winsorize:
+    method: percentile
+    lower: 0.025
+    upper: 0.975
+  normalize:
+    method: zscore
+    cross_section: true
+```
+
+### Q3: 如何加速因子计算？
+
+A: 
+1. 使用 Qlib 的缓存机制
+2. 避免在因子表达式中使用循环
+3. 使用向量化操作
+4. 考虑使用 Dask 进行并行计算
+
+### Q4: 如何对比不同时间段的模型表现？
+
+A: 使用 ExperimentManager 的时间序列分析功能：
+
+```python
+exp_manager.analyze_time_series(
+    exp_names=["exp_001", "exp_002"],
+    frequency="monthly"
+)
+```
+
+### Q5: 如何将模型部署到生产环境？
+
+A: 
+1. 使用 model_comparator 选择最佳模型
+2. 导出模型到 model_pkl/ 目录
+3. 更新 roll/config.yaml 中的模型配置
+4. 通过 GitHub Actions 自动部署
+
+---
+
+## 八、进阶功能建议
+
+### 8.1 自动化因子挖掘
+
+使用遗传算法或强化学习自动搜索最优因子组合：
+
+```python
+from research.auto_factor_search import FactorSearchEngine
+
+engine = FactorSearchEngine()
+best_combination = engine.search(
+    candidate_factors=["factor_001", "factor_002", ...],
+    max_factors=10,
+    optimization_target="icir"
+)
+```
+
+### 8.2 在线学习
+
+支持模型在线更新，适应市场变化：
+
+```python
+from research.online_learning import OnlineLearner
+
+learner = OnlineLearner(model="xgboost")
+learner.update_with_new_data(new_data)
+```
+
+### 8.3 因子重要性分析
+
+分析每个因子对模型预测的贡献：
+
+```python
+from research.feature_importance import FactorAnalyzer
+
+analyzer = FactorAnalyzer(model_path="model.pkl")
+importance = analyzer.analyze()
+print(importance)
+```
+
+### 8.4 集成学习
+
+自动选择最优模型组合：
+
+```python
+from research.ensemble import EnsembleBuilder
+
+builder = EnsembleBuilder()
+ensemble = builder.build(
+    candidate_models=["exp_001", "exp_002", "exp_003"],
+    method="stacking"
+)
+```
+
+---
+
+## 九、性能优化建议
+
+1. **因子计算优化**
+   - 使用 Qlib 的 ExpressionCache
+   - 预计算常用因子
+   - 使用并行计算
+
+2. **训练优化**
+   - 使用多进程训练（已有实现）
+   - 使用 GPU 加速（如果可用）
+   - 增量训练而非全量重训练
+
+3. **存储优化**
+   - 压缩模型文件
+   - 使用 Parquet 格式存储因子数据
+   - 定期清理过期实验
+
+---
+
+## 十、总结
+
+本方案提供了一个完整的因子研究和模型对比平台，核心优势：
+
+1. **易用性**: 通过命令行工具和 API，快速注册因子、创建组合、运行实验
+2. **可扩展性**: 模块化设计，便于添加新功能
+3. **可对比性**: 自动记录实验结果，生成对比报告
+4. **自动化**: 支持与 LLM 集成，自动从论文中提取因子
+
+下一步行动：
+1. 使用第四部分的 LLM 提示词生成代码
+2. 按照第五部分的使用流程测试功能
+3. 根据实际需求调整和优化
+
+祝研究顺利！

@@ -37,9 +37,9 @@ import numpy as np
 import pandas as pd
 import requests
 
-# 默认仓库（可被 Fire 顶层参数覆盖）
-OWNER = "touhoufan"
-DATABASE = "qlibDailyCsv"
+# 默认仓库（可被环境变量 / Fire 顶层参数覆盖）
+OWNER = os.getenv("DOLT_OWNER", "miaomiaom").strip() or "miaomiaom"
+DATABASE = os.getenv("DOLT_DATABASE", "qlibDailyCsv").strip() or "qlibDailyCsv"
 REF = os.getenv("DOLT_REF", "main").strip() or "main"
 TOKEN = os.getenv("DOLT_TOKEN")
 
